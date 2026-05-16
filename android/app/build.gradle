@@ -37,6 +37,13 @@ android {
             signingConfig = signingConfigs.debug
         }
     }
+
+    // --- AQUÍ SE COLOCA EL CÓDIGO PARA CAMBIAR EL NOMBRE DEL APK ---
+    applicationVariants.all { variant ->
+        variant.outputs.all {
+            outputFileName = "Calculadora_BCV.apk"
+        }
+    }
 }
 
 flutter {
