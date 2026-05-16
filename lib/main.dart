@@ -15,6 +15,17 @@ class CalculadoraApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Conversor Dólar/Euro',
+      // --- 1. MODO OSCURO FORZADO ---
+      themeMode: ThemeMode.dark,
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        colorScheme: const ColorScheme.dark(
+          primary: Colors.green,
+          secondary: Colors.greenAccent,
+          surface: Color(0xFF1E1E1E), // Color de fondo elegante para tarjetas
+        ),
+        useMaterial3: true,
+      ),
       theme: ThemeData(
         primarySwatch: Colors.green,
         useMaterial3: true,
@@ -78,8 +89,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   double _tasaActual = 0.0;
   String _fechaActualizacion = '';
   bool _isLoading = true;
-
-  // --- NUEVA VARIABLE DE CONTROL ---
   bool _esDolar = true;
 
   final TextEditingController _foreignController =
@@ -96,7 +105,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     _cargarTasa();
   }
 
-  // Modificado para pasar el estado actual de la moneda a la API
   Future<void> _cargarTasa() async {
     final data = await _apiService.getTasas(_esDolar);
     if (data != null && mounted) {
@@ -111,7 +119,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     }
   }
 
-  // --- FUNCIÓN PARA CAMBIAR ENTRE DÓLAR Y EURO ---
   void _cambiarMoneda() {
     setState(() {
       _esDolar = !_esDolar;
@@ -174,10 +181,28 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     );
   }
 
+  // --- 3. MENÚ DE PEGAR PERSONALIZADO ---
+  Widget _construirMenuPegar(
+      BuildContext context, EditableTextState editableTextState) {
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: editableTextState.contextMenuAnchors,
+      buttonItems: [
+        ContextMenuButtonItem(
+          onPressed: () {
+            editableTextState.pasteText(SelectionChangedCause.toolbar);
+            editableTextState.hideToolbar();
+          },
+          type: ContextMenuButtonType.custom,
+          label: 'Pegar', // Solo la opción de pegar en español
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey.shade100,
+      // Se quitó el color de fondo estático para respetar el modo oscuro
       appBar: AppBar(
         title: const Text('💱 Conversor BCV',
             style: TextStyle(fontWeight: FontWeight.bold)),
@@ -205,7 +230,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                     ),
                     child: Column(
                       children: [
-                        // --- BANNER VERDE CONVERTIDO EN BOTÓN INTERACTIVO ---
                         InkWell(
                           onTap: _cambiarMoneda,
                           borderRadius: const BorderRadius.vertical(
@@ -221,9 +245,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 Text(
-                                  _esDolar
-                                      ? 'Dólar BCV'
-                                      : 'Euro BCV', // Cambia el texto automáticamente
+                                  _esDolar ? 'Dólar BCV' : 'Euro BCV',
                                   style: const TextStyle(
                                       color: Colors.white,
                                       fontSize: 18,
@@ -231,13 +253,11 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                 ),
                                 const SizedBox(width: 8),
                                 const Icon(Icons.loop,
-                                    color: Colors.white,
-                                    size: 20), // Icono indicador de cambio
+                                    color: Colors.white, size: 20),
                               ],
                             ),
                           ),
                         ),
-
                         Padding(
                           padding: const EdgeInsets.all(20.0),
                           child: Column(
@@ -250,17 +270,24 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                         decimal: true),
                                 inputFormatters: [FormatoMiles()],
                                 onChanged: _convertirDivisaABs,
+                                contextMenuBuilder:
+                                    _construirMenuPegar, // Se aplica el menú personalizado
                                 style: const TextStyle(
                                     fontSize: 24, fontWeight: FontWeight.w500),
                                 textAlign: TextAlign.right,
                                 decoration: InputDecoration(
-                                  prefixText: _esDolar
-                                      ? '\$  '
-                                      : '€  ', // Cambia el símbolo dinámicamente
-                                  prefixStyle: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.black87),
+                                  // --- 2. SÍMBOLO SIEMPRE VISIBLE ---
+                                  prefixIconConstraints: const BoxConstraints(
+                                      minWidth: 0, minHeight: 0),
+                                  prefixIcon: Padding(
+                                    padding: const EdgeInsets.only(right: 8.0),
+                                    child: Text(
+                                      _esDolar ? '\$  ' : '€  ',
+                                      style: const TextStyle(
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
                                   hintText: "0,00",
                                   enabledBorder: const UnderlineInputBorder(
                                     borderSide: BorderSide(color: Colors.grey),
@@ -291,15 +318,24 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                         decimal: true),
                                 inputFormatters: [FormatoMiles()],
                                 onChanged: _convertirBsADivisa,
+                                contextMenuBuilder:
+                                    _construirMenuPegar, // Se aplica el menú personalizado
                                 style: const TextStyle(
                                     fontSize: 24, fontWeight: FontWeight.w500),
                                 textAlign: TextAlign.right,
                                 decoration: InputDecoration(
-                                  prefixText: 'Bs  ',
-                                  prefixStyle: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.black87),
+                                  // --- 2. SÍMBOLO SIEMPRE VISIBLE ---
+                                  prefixIconConstraints: const BoxConstraints(
+                                      minWidth: 0, minHeight: 0),
+                                  prefixIcon: const Padding(
+                                    padding: EdgeInsets.only(right: 8.0),
+                                    child: Text(
+                                      'Bs  ',
+                                      style: TextStyle(
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
                                   hintText: "0,00",
                                   enabledBorder: const UnderlineInputBorder(
                                     borderSide: BorderSide(color: Colors.grey),
@@ -320,29 +356,29 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                             ],
                           ),
                         ),
-
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
-                              color: Colors.grey.shade50,
+                              color: Colors.white
+                                  .withOpacity(0.05), // Adaptado al modo oscuro
                               borderRadius: const BorderRadius.vertical(
                                   bottom: Radius.circular(16)),
                               border: Border(
-                                  top:
-                                      BorderSide(color: Colors.grey.shade200))),
+                                  top: BorderSide(
+                                      color: Colors.white.withOpacity(0.1)))),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Row(
                                 children: [
                                   Icon(Icons.calendar_month,
-                                      size: 16, color: Colors.grey.shade600),
+                                      size: 16, color: Colors.grey.shade400),
                                   const SizedBox(width: 6),
                                   Text(
                                     _fechaActualizacion,
                                     style: TextStyle(
-                                        color: Colors.grey.shade700,
+                                        color: Colors.grey.shade400,
                                         fontWeight: FontWeight.w500),
                                   ),
                                 ],
@@ -353,7 +389,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                       size: 16, color: Colors.green),
                                   const SizedBox(width: 4),
                                   Text(
-                                    // Cambia la leyenda del pie de página según corresponda
                                     _esDolar
                                         ? '1 USD = ${_formatoTasa.format(_tasaActual)}'
                                         : '1 EUR = ${_formatoTasa.format(_tasaActual)}',
