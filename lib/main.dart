@@ -31,7 +31,7 @@ class CalculadoraApp extends StatelessWidget {
   }
 }
 
-// --- FORMATEADOR ATM MEJORADO: NUNCA DEJA "0,00", RESTAURA LA TASA BASE ---
+// --- FORMATEADOR ATM + CURSOR LIBRE + AUTO RESET ---
 class CurrencyInputFormatter extends TextInputFormatter {
   final String defaultValue;
 
@@ -40,32 +40,34 @@ class CurrencyInputFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
       TextEditingValue oldValue, TextEditingValue newValue) {
-    // Extraemos solo los números
+    // Calculamos la posición del cursor desde la DERECHA para mantenerlo en su sitio
+    int offsetFromEnd = newValue.text.length - newValue.selection.end;
+
     String digitsOnly = newValue.text.replaceAll(RegExp(r'[^\d]'), '');
 
-    // LA MAGIA: Si el usuario borra todo o el valor matemático llega a cero absoluto,
-    // restauramos automáticamente el valor por defecto ("1,00" o la tasa).
+    // RESTAURADO: Si borra todo o llega a cero absoluto, cierra teclado y vuelve a la tasa base
     if (digitsOnly.isEmpty || double.tryParse(digitsOnly) == 0) {
       SystemChannels.textInput.invokeMethod('TextInput.hide');
       return TextEditingValue(
         text: defaultValue,
-        // Lo dejamos seleccionado para que el usuario pueda escribir encima si quiere
         selection:
             TextSelection(baseOffset: 0, extentOffset: defaultValue.length),
       );
     }
 
-    // Límite de seguridad: 15 dígitos máximo
     if (digitsOnly.length > 15) return oldValue;
 
-    // Efecto ATM: Dividimos entre 100 para crear los decimales
+    // Efecto Cajero Automático (ATM)
     double value = double.parse(digitsOnly) / 100;
     String formattedText = NumberFormat("#,##0.00", "es_VE").format(value);
 
+    // Restauramos el cursor en la posición exacta
+    int newCursorPos =
+        (formattedText.length - offsetFromEnd).clamp(0, formattedText.length);
+
     return TextEditingValue(
       text: formattedText,
-      // El cursor siempre empujando al final
-      selection: TextSelection.collapsed(offset: formattedText.length),
+      selection: TextSelection.collapsed(offset: newCursorPos),
     );
   }
 }
@@ -76,12 +78,15 @@ class CalculadoraScreen extends StatefulWidget {
   State<CalculadoraScreen> createState() => _CalculadoraScreenState();
 }
 
-enum ModoVista { dolar, euro, calculadora }
+enum ModoVista { dolar, euro, personalizada, calculadora }
 
 class _CalculadoraScreenState extends State<CalculadoraScreen> {
   final DolarApiService _apiService = DolarApiService();
   double _tasaActualDolar = 0.0;
   double _tasaActualEuro = 0.0;
+
+  double _tasaPersonalizada = 0.0;
+
   String _fechaActualizacion = '';
   bool _isLoading = true;
 
@@ -90,6 +95,8 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   final TextEditingController _foreignController =
       TextEditingController(text: "1,00");
   final TextEditingController _bsController = TextEditingController();
+  final TextEditingController _customRateController =
+      TextEditingController(text: "1,00");
 
   final TextEditingController _mathController = TextEditingController();
   final ScrollController _mathScrollController = ScrollController();
@@ -118,6 +125,10 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
         _tasaActualDolar = (dataDolar['promedio'] ?? 0).toDouble();
         _tasaActualEuro = (dataEuro['promedio'] ?? 0).toDouble();
 
+        _tasaPersonalizada = _tasaActualDolar;
+        _customRateController.text =
+            _formatoInyeccion.format(_tasaPersonalizada);
+
         DateTime fecha = DateTime.parse(dataDolar['fechaActualizacion']);
         _fechaActualizacion = DateFormat('dd/MM/yyyy').format(fecha);
         _isLoading = false;
@@ -127,9 +138,21 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     }
   }
 
+  double _getTasaActiva() {
+    switch (_modoActual) {
+      case ModoVista.dolar:
+        return _tasaActualDolar;
+      case ModoVista.euro:
+        return _tasaActualEuro;
+      case ModoVista.personalizada:
+        return _tasaPersonalizada;
+      case ModoVista.calculadora:
+        return _tasaActualDolar;
+    }
+  }
+
   void _convertirDivisaABs(String valor) {
-    double tasa =
-        _modoActual == ModoVista.dolar ? _tasaActualDolar : _tasaActualEuro;
+    double tasa = _getTasaActiva();
     if (tasa == 0 || valor.isEmpty) {
       _bsController.text = '';
       return;
@@ -140,8 +163,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   }
 
   void _convertirBsADivisa(String valor) {
-    double tasa =
-        _modoActual == ModoVista.dolar ? _tasaActualDolar : _tasaActualEuro;
+    double tasa = _getTasaActiva();
     if (tasa == 0 || valor.isEmpty) {
       _foreignController.text = '';
       return;
@@ -152,7 +174,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   }
 
   void _evaluarMatematica(String expresion) {
-    if (expresion.isEmpty) {
+    if (expresion.isEmpty || expresion == "0,00") {
       setState(() {
         _mathResultBs = 0.0;
         _mathResultDivisa = 0.0;
@@ -176,13 +198,14 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
 
       setState(() {
         _mathError = false;
+        double tasaCalculadora = _tasaActualDolar;
         if (_mathInDivisa) {
           _mathResultDivisa = resultado;
-          _mathResultBs = resultado * _tasaActualDolar;
+          _mathResultBs = resultado * tasaCalculadora;
         } else {
           _mathResultBs = resultado;
           _mathResultDivisa =
-              _tasaActualDolar > 0 ? resultado / _tasaActualDolar : 0.0;
+              tasaCalculadora > 0 ? resultado / tasaCalculadora : 0.0;
         }
       });
     } catch (e) {
@@ -200,30 +223,29 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     String newText;
 
     if (valor == 'C') {
-      _mathController.clear();
-      setState(() {});
-      _evaluarMatematica("");
+      _restablecerValores();
       return;
     } else if (valor == '⌫') {
       if (cursorPosition > 0) {
         String leftPart = text.substring(0, cursorPosition);
         String rightPart = text.substring(cursorPosition);
 
-        if (leftPart.endsWith("0,00")) {
-          leftPart = leftPart.substring(0, leftPart.length - 4);
-        } else if (RegExp(r'[+\-x/()]')
-            .hasMatch(leftPart[leftPart.length - 1])) {
-          leftPart = leftPart.substring(0, leftPart.length - 1);
-        } else {
-          int lastDigitIndex = leftPart.lastIndexOf(RegExp(r'\d'));
-          if (lastDigitIndex != -1) {
-            leftPart = leftPart.substring(0, lastDigitIndex) +
-                leftPart.substring(lastDigitIndex + 1);
-          } else {
-            leftPart = leftPart.substring(0, leftPart.length - 1);
-          }
+        int deleteCount = 1;
+        if ((leftPart.endsWith(',') || leftPart.endsWith('.')) &&
+            leftPart.length > 1) {
+          deleteCount = 2;
         }
-        newText = leftPart + rightPart;
+
+        newText =
+            leftPart.substring(0, leftPart.length - deleteCount) + rightPart;
+        offsetFromEnd = rightPart.length;
+
+        // RESTAURADO: Si borramos hasta dejar cero absoluto en la calculadora, reseteamos todo
+        String digitsOnlyCheck = newText.replaceAll(RegExp(r'[^\d]'), '');
+        if (digitsOnlyCheck.isEmpty || double.tryParse(digitsOnlyCheck) == 0) {
+          _restablecerValores();
+          return;
+        }
       } else {
         newText = text;
       }
@@ -233,9 +255,8 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
           ultimoNumero.replaceAll(RegExp(r'[^0-9]'), '').length;
 
       if (cantidadNumeros + valor.length > 15 &&
-          RegExp(r'[0-9]').hasMatch(valor)) {
-        return;
-      }
+          RegExp(r'[0-9]').hasMatch(valor)) return;
+
       newText = text.substring(0, cursorPosition) +
           valor +
           text.substring(cursorPosition);
@@ -251,8 +272,8 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
       return NumberFormat("#,##0.00", "es_VE").format(value);
     });
 
-    int newCursorPos = formattedText.length - offsetFromEnd;
-    newCursorPos = newCursorPos.clamp(0, formattedText.length);
+    int newCursorPos =
+        (formattedText.length - offsetFromEnd).clamp(0, formattedText.length);
 
     setState(() {
       _mathController.value = TextEditingValue(
@@ -321,6 +342,8 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     setState(() {
       _foreignController.text = "1,00";
       _mathController.clear();
+      _tasaPersonalizada = _tasaActualDolar;
+      _customRateController.text = _formatoInyeccion.format(_tasaPersonalizada);
       _convertirDivisaABs("1,00");
       _evaluarMatematica("");
     });
@@ -329,8 +352,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
 
   @override
   Widget build(BuildContext context) {
-    double tasaAMostrar =
-        _modoActual == ModoVista.euro ? _tasaActualEuro : _tasaActualDolar;
+    double tasaAMostrar = _getTasaActiva();
     final screenHeight = MediaQuery.of(context).size.height;
 
     return Scaffold(
@@ -390,8 +412,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                   _mathController.clear();
                                   _mathInDivisa = true;
 
-                                  if (_modoActual == ModoVista.dolar ||
-                                      _modoActual == ModoVista.euro) {
+                                  if (_modoActual != ModoVista.calculadora) {
                                     _convertirDivisaABs("1,00");
                                   } else {
                                     _evaluarMatematica("");
@@ -421,6 +442,14 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                           style: TextStyle(
                                               fontWeight: FontWeight.bold))),
                                 ),
+                                const PopupMenuItem<ModoVista>(
+                                  value: ModoVista.personalizada,
+                                  child: Center(
+                                      child: Text('Personalizada',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.orangeAccent))),
+                                ),
                               ],
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -431,7 +460,10 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                         ? 'Dólar BCV'
                                         : _modoActual == ModoVista.euro
                                             ? 'Euro BCV'
-                                            : 'Calculadora',
+                                            : _modoActual ==
+                                                    ModoVista.personalizada
+                                                ? 'Personalizada'
+                                                : 'Calculadora',
                                     style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 18,
@@ -474,9 +506,14 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                                 child: Text(
                                   _modoActual == ModoVista.calculadora
                                       ? 'Base: ${_formatoTasa.format(_tasaActualDolar)}'
-                                      : '1 ${_modoActual == ModoVista.dolar ? "USD" : "EUR"} = ${_formatoTasa.format(tasaAMostrar)}',
-                                  style: const TextStyle(
-                                      color: Colors.green,
+                                      : _modoActual == ModoVista.personalizada
+                                          ? 'Tasa Base: ${_formatoTasa.format(_tasaPersonalizada)}'
+                                          : '1 ${_modoActual == ModoVista.dolar ? "USD" : "EUR"} = ${_formatoTasa.format(tasaAMostrar)}',
+                                  style: TextStyle(
+                                      color:
+                                          _modoActual == ModoVista.personalizada
+                                              ? Colors.orangeAccent
+                                              : Colors.green,
                                       fontWeight: FontWeight.bold,
                                       fontSize: 13),
                                   textAlign: TextAlign.right,
@@ -498,6 +535,50 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   Widget _buildConversorNormal(double screenHeight, double tasaAMostrar) {
     return Column(
       children: [
+        if (_modoActual == ModoVista.personalizada) ...[
+          TextField(
+            controller: _customRateController,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [CurrencyInputFormatter(defaultValue: "1,00")],
+            onTap: () {
+              _customRateController.selection = TextSelection(
+                  baseOffset: 0,
+                  extentOffset: _customRateController.text.length);
+            },
+            onChanged: (valor) {
+              String valorLimpio =
+                  valor.replaceAll('.', '').replaceAll(',', '.');
+              setState(() {
+                _tasaPersonalizada = double.tryParse(valorLimpio) ?? 0.0;
+                _convertirDivisaABs(_foreignController.text);
+              });
+            },
+            contextMenuBuilder: _construirMenuPegar,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Colors.orangeAccent),
+            decoration: InputDecoration(
+              prefixIconConstraints:
+                  const BoxConstraints(minWidth: 0, minHeight: 0),
+              prefixIcon: const Text('Tasa',
+                  style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.orangeAccent)),
+              suffixIcon: IconButton(
+                  icon: const Icon(Icons.copy, color: Colors.orangeAccent),
+                  onPressed: () =>
+                      _copiarAlPortapapeles(_customRateController.text)),
+              enabledBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.orangeAccent, width: 1)),
+              focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.orangeAccent, width: 2)),
+            ),
+          ),
+          SizedBox(height: screenHeight * 0.03),
+        ],
         TextField(
           controller: _foreignController,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -513,7 +594,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
           decoration: InputDecoration(
             prefixIconConstraints:
                 const BoxConstraints(minWidth: 0, minHeight: 0),
-            prefixIcon: Text(_modoActual == ModoVista.dolar ? '\$ ' : '€ ',
+            prefixIcon: Text(_modoActual == ModoVista.euro ? '€ ' : '\$ ',
                 style:
                     const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
             suffixIcon: IconButton(
@@ -731,6 +812,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   void dispose() {
     _foreignController.dispose();
     _bsController.dispose();
+    _customRateController.dispose();
     _mathController.dispose();
     _mathScrollController.dispose();
     super.dispose();
