@@ -31,30 +31,41 @@ class CalculadoraApp extends StatelessWidget {
   }
 }
 
-class FormatoMiles extends TextInputFormatter {
+// --- FORMATEADOR ATM MEJORADO: NUNCA DEJA "0,00", RESTAURA LA TASA BASE ---
+class CurrencyInputFormatter extends TextInputFormatter {
+  final String defaultValue;
+
+  CurrencyInputFormatter({this.defaultValue = '1,00'});
+
   @override
   TextEditingValue formatEditUpdate(
       TextEditingValue oldValue, TextEditingValue newValue) {
-    if (newValue.text.isEmpty) return newValue.copyWith(text: '');
-    int offsetFromEnd = newValue.text.length - newValue.selection.end;
-    String cleanText = newValue.text.replaceAll(RegExp(r'[^0-9,]'), '');
-    if (','.allMatches(cleanText).length > 1) {
-      cleanText = cleanText.substring(0, cleanText.lastIndexOf(','));
+    // Extraemos solo los números
+    String digitsOnly = newValue.text.replaceAll(RegExp(r'[^\d]'), '');
+
+    // LA MAGIA: Si el usuario borra todo o el valor matemático llega a cero absoluto,
+    // restauramos automáticamente el valor por defecto ("1,00" o la tasa).
+    if (digitsOnly.isEmpty || double.tryParse(digitsOnly) == 0) {
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      return TextEditingValue(
+        text: defaultValue,
+        // Lo dejamos seleccionado para que el usuario pueda escribir encima si quiere
+        selection:
+            TextSelection(baseOffset: 0, extentOffset: defaultValue.length),
+      );
     }
-    List<String> parts = cleanText.split(',');
-    String integerPart = parts[0];
-    String formattedInteger = '';
-    for (int i = integerPart.length - 1, j = 1; i >= 0; i--, j++) {
-      formattedInteger = integerPart[i] + formattedInteger;
-      if (j % 3 == 0 && i != 0) formattedInteger = '.$formattedInteger';
-    }
-    String finalText = formattedInteger;
-    if (parts.length > 1) finalText += ',${parts[1]}';
-    int finalCursorPosition =
-        (finalText.length - offsetFromEnd).clamp(0, finalText.length);
+
+    // Límite de seguridad: 15 dígitos máximo
+    if (digitsOnly.length > 15) return oldValue;
+
+    // Efecto ATM: Dividimos entre 100 para crear los decimales
+    double value = double.parse(digitsOnly) / 100;
+    String formattedText = NumberFormat("#,##0.00", "es_VE").format(value);
+
     return TextEditingValue(
-      text: finalText,
-      selection: TextSelection.collapsed(offset: finalCursorPosition),
+      text: formattedText,
+      // El cursor siempre empujando al final
+      selection: TextSelection.collapsed(offset: formattedText.length),
     );
   }
 }
@@ -81,6 +92,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   final TextEditingController _bsController = TextEditingController();
 
   final TextEditingController _mathController = TextEditingController();
+  final ScrollController _mathScrollController = ScrollController();
 
   bool _mathInDivisa = true;
   double _mathResultBs = 0.0;
@@ -158,9 +170,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
       double resultado = exp.evaluate(EvaluationType.REAL, ContextModel());
 
       if (resultado.isInfinite || resultado.isNaN) {
-        setState(() {
-          _mathError = true;
-        });
+        setState(() => _mathError = true);
         return;
       }
 
@@ -176,39 +186,92 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
         }
       });
     } catch (e) {
-      // Ignoramos errores de escritura incompleta silenciosamente
+      // Silencioso
     }
   }
 
   void _onCalcButtonPressed(String valor) {
-    final text = _mathController.text;
-    final selection = _mathController.selection;
-    int cursorPosition = selection.baseOffset;
+    String text = _mathController.text;
 
+    int cursorPosition = _mathController.selection.baseOffset;
     if (cursorPosition < 0) cursorPosition = text.length;
+
+    int offsetFromEnd = text.length - cursorPosition;
+    String newText;
 
     if (valor == 'C') {
       _mathController.clear();
+      setState(() {});
+      _evaluarMatematica("");
+      return;
     } else if (valor == '⌫') {
       if (cursorPosition > 0) {
-        final newText = text.substring(0, cursorPosition - 1) +
-            text.substring(cursorPosition);
-        _mathController.value = TextEditingValue(
-          text: newText,
-          selection: TextSelection.collapsed(offset: cursorPosition - 1),
-        );
+        String leftPart = text.substring(0, cursorPosition);
+        String rightPart = text.substring(cursorPosition);
+
+        if (leftPart.endsWith("0,00")) {
+          leftPart = leftPart.substring(0, leftPart.length - 4);
+        } else if (RegExp(r'[+\-x/()]')
+            .hasMatch(leftPart[leftPart.length - 1])) {
+          leftPart = leftPart.substring(0, leftPart.length - 1);
+        } else {
+          int lastDigitIndex = leftPart.lastIndexOf(RegExp(r'\d'));
+          if (lastDigitIndex != -1) {
+            leftPart = leftPart.substring(0, lastDigitIndex) +
+                leftPart.substring(lastDigitIndex + 1);
+          } else {
+            leftPart = leftPart.substring(0, leftPart.length - 1);
+          }
+        }
+        newText = leftPart + rightPart;
+      } else {
+        newText = text;
       }
     } else {
-      final newText = text.substring(0, cursorPosition) +
+      String ultimoNumero = text.split(RegExp(r'[+\-x/]')).last;
+      int cantidadNumeros =
+          ultimoNumero.replaceAll(RegExp(r'[^0-9]'), '').length;
+
+      if (cantidadNumeros + valor.length > 15 &&
+          RegExp(r'[0-9]').hasMatch(valor)) {
+        return;
+      }
+      newText = text.substring(0, cursorPosition) +
           valor +
           text.substring(cursorPosition);
-      _mathController.value = TextEditingValue(
-        text: newText,
-        selection:
-            TextSelection.collapsed(offset: cursorPosition + valor.length),
-      );
     }
+
+    String formattedText =
+        newText.replaceAllMapped(RegExp(r'[\d.,]+'), (match) {
+      String numStr = match.group(0)!;
+      String digitsOnly = numStr.replaceAll(RegExp(r'[^\d]'), '');
+      if (digitsOnly.isEmpty) return numStr;
+
+      double value = double.parse(digitsOnly) / 100;
+      return NumberFormat("#,##0.00", "es_VE").format(value);
+    });
+
+    int newCursorPos = formattedText.length - offsetFromEnd;
+    newCursorPos = newCursorPos.clamp(0, formattedText.length);
+
+    setState(() {
+      _mathController.value = TextEditingValue(
+        text: formattedText,
+        selection: TextSelection.collapsed(offset: newCursorPos),
+      );
+    });
+
     _evaluarMatematica(_mathController.text);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_mathScrollController.hasClients) {
+        _mathScrollController.animateTo(
+          _mathScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   void _copiarAlPortapapeles(String texto) {
@@ -232,7 +295,20 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
             editableTextState.pasteText(SelectionChangedCause.toolbar);
             editableTextState.hideToolbar();
             await Future.delayed(const Duration(milliseconds: 50));
-            _evaluarMatematica(_mathController.text);
+
+            String text = _mathController.text;
+            String formattedText =
+                text.replaceAllMapped(RegExp(r'[\d.,]+'), (match) {
+              String numStr = match.group(0)!;
+              String digitsOnly = numStr.replaceAll(RegExp(r'[^\d]'), '');
+              if (digitsOnly.isEmpty) return numStr;
+              double value = double.parse(digitsOnly) / 100;
+              return NumberFormat("#,##0.00", "es_VE").format(value);
+            });
+            setState(() {
+              _mathController.text = formattedText;
+            });
+            _evaluarMatematica(formattedText);
           },
           label: 'Pegar',
         ),
@@ -241,9 +317,13 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   }
 
   void _restablecerValores() {
-    _foreignController.text = "1,00";
-    _mathController.clear();
-    _evaluarMatematica("");
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _foreignController.text = "1,00";
+      _mathController.clear();
+      _convertirDivisaABs("1,00");
+      _evaluarMatematica("");
+    });
     _cargarTodasLasTasas();
   }
 
@@ -251,7 +331,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
   Widget build(BuildContext context) {
     double tasaAMostrar =
         _modoActual == ModoVista.euro ? _tasaActualEuro : _tasaActualDolar;
-    // Capturamos el tamaño de la pantalla para hacer la app Responsive
     final screenHeight = MediaQuery.of(context).size.height;
 
     return Scaffold(
@@ -265,151 +344,168 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
               icon: const Icon(Icons.refresh), onPressed: _restablecerValores)
         ],
       ),
-      // --- SAFEAREA APLICADO AQUÍ ---
       body: SafeArea(
         bottom: true,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : SingleChildScrollView(
-                padding: const EdgeInsets.all(16.0),
-                child: Card(
-                  elevation: 6,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16)),
-                  child: Column(
-                    children: [
-                      Container(
-                        width: double.infinity,
-                        padding: EdgeInsets.symmetric(
-                            vertical: screenHeight * 0.015),
-                        decoration: const BoxDecoration(
-                            color: Colors.green,
-                            borderRadius: BorderRadius.vertical(
-                                top: Radius.circular(16))),
-                        child: Center(
-                          child: PopupMenuButton<ModoVista>(
-                            initialValue: _modoActual,
-                            color: Colors.grey.shade900,
-                            position: PopupMenuPosition.under,
-                            onSelected: (ModoVista modoSeleccionado) {
-                              setState(() {
-                                _modoActual = modoSeleccionado;
+        child: GestureDetector(
+          onTap: () {
+            FocusManager.instance.primaryFocus?.unfocus();
+          },
+          behavior: HitTestBehavior.opaque,
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Card(
+                    elevation: 6,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    child: Column(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          padding: EdgeInsets.symmetric(
+                              vertical: screenHeight * 0.015),
+                          decoration: const BoxDecoration(
+                              color: Colors.green,
+                              borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(16))),
+                          child: Center(
+                            child: PopupMenuButton<ModoVista>(
+                              initialValue: _modoActual,
+                              color: Colors.grey.shade900,
+                              position: PopupMenuPosition.under,
+                              onOpened: () {
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                SystemChannels.textInput
+                                    .invokeMethod('TextInput.hide');
+                              },
+                              onSelected: (ModoVista modoSeleccionado) {
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                SystemChannels.textInput
+                                    .invokeMethod('TextInput.hide');
 
-                                _foreignController.text = "1,00";
-                                _mathController.clear();
-                                _mathInDivisa = true;
+                                setState(() {
+                                  _modoActual = modoSeleccionado;
+                                  _foreignController.text = "1,00";
+                                  _mathController.clear();
+                                  _mathInDivisa = true;
 
-                                if (_modoActual == ModoVista.dolar ||
-                                    _modoActual == ModoVista.euro) {
-                                  _convertirDivisaABs("1,00");
-                                } else {
-                                  _evaluarMatematica("");
-                                }
-                              });
-                            },
-                            itemBuilder: (BuildContext context) =>
-                                <PopupMenuEntry<ModoVista>>[
-                              const PopupMenuItem<ModoVista>(
-                                value: ModoVista.dolar,
-                                child: Center(
-                                    child: Text('Dólar BCV',
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold))),
-                              ),
-                              const PopupMenuItem<ModoVista>(
-                                value: ModoVista.euro,
-                                child: Center(
-                                    child: Text('Euro BCV',
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold))),
-                              ),
-                              const PopupMenuItem<ModoVista>(
-                                value: ModoVista.calculadora,
-                                child: Center(
-                                    child: Text('Calculadora',
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold))),
-                              ),
-                            ],
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  _modoActual == ModoVista.dolar
-                                      ? 'Dólar BCV'
-                                      : _modoActual == ModoVista.euro
-                                          ? 'Euro BCV'
-                                          : 'Calculadora',
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold),
+                                  if (_modoActual == ModoVista.dolar ||
+                                      _modoActual == ModoVista.euro) {
+                                    _convertirDivisaABs("1,00");
+                                  } else {
+                                    _evaluarMatematica("");
+                                  }
+                                });
+                              },
+                              itemBuilder: (BuildContext context) =>
+                                  <PopupMenuEntry<ModoVista>>[
+                                const PopupMenuItem<ModoVista>(
+                                  value: ModoVista.dolar,
+                                  child: Center(
+                                      child: Text('Dólar BCV',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold))),
                                 ),
-                                const SizedBox(width: 10),
-                                const Icon(Icons.arrow_drop_down_circle,
-                                    color: Colors.white),
+                                const PopupMenuItem<ModoVista>(
+                                  value: ModoVista.euro,
+                                  child: Center(
+                                      child: Text('Euro BCV',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold))),
+                                ),
+                                const PopupMenuItem<ModoVista>(
+                                  value: ModoVista.calculadora,
+                                  child: Center(
+                                      child: Text('Calculadora',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.bold))),
+                                ),
                               ],
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    _modoActual == ModoVista.dolar
+                                        ? 'Dólar BCV'
+                                        : _modoActual == ModoVista.euro
+                                            ? 'Euro BCV'
+                                            : 'Calculadora',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  const Icon(Icons.arrow_drop_down_circle,
+                                      color: Colors.white),
+                                ],
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      Padding(
-                        padding: EdgeInsets.all(screenHeight * 0.02),
-                        child: _modoActual == ModoVista.calculadora
-                            ? _buildCalculadoraUnificada(screenHeight)
-                            : _buildConversorNormal(screenHeight),
-                      ),
-                      Container(
-                        padding: EdgeInsets.symmetric(
-                            horizontal: 20, vertical: screenHeight * 0.015),
-                        decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.05),
-                            borderRadius: const BorderRadius.vertical(
-                                bottom: Radius.circular(16))),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Expanded(
-                              child: Text(_fechaActualizacion,
-                                  style: TextStyle(
-                                      color: Colors.grey.shade400,
-                                      fontSize: 12),
-                                  overflow: TextOverflow.ellipsis),
-                            ),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                _modoActual == ModoVista.calculadora
-                                    ? 'Base: ${_formatoTasa.format(_tasaActualDolar)}'
-                                    : '1 ${_modoActual == ModoVista.dolar ? "USD" : "EUR"} = ${_formatoTasa.format(tasaAMostrar)}',
-                                style: const TextStyle(
-                                    color: Colors.green,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 13),
-                                textAlign: TextAlign.right,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
+                        Padding(
+                          padding: EdgeInsets.all(screenHeight * 0.02),
+                          child: _modoActual == ModoVista.calculadora
+                              ? _buildCalculadoraUnificada(screenHeight)
+                              : _buildConversorNormal(
+                                  screenHeight, tasaAMostrar),
                         ),
-                      )
-                    ],
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 20, vertical: screenHeight * 0.015),
+                          decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: const BorderRadius.vertical(
+                                  bottom: Radius.circular(16))),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: Text(_fechaActualizacion,
+                                    style: TextStyle(
+                                        color: Colors.grey.shade400,
+                                        fontSize: 12),
+                                    overflow: TextOverflow.ellipsis),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Text(
+                                  _modoActual == ModoVista.calculadora
+                                      ? 'Base: ${_formatoTasa.format(_tasaActualDolar)}'
+                                      : '1 ${_modoActual == ModoVista.dolar ? "USD" : "EUR"} = ${_formatoTasa.format(tasaAMostrar)}',
+                                  style: const TextStyle(
+                                      color: Colors.green,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13),
+                                  textAlign: TextAlign.right,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      ],
+                    ),
                   ),
                 ),
-              ),
+        ),
       ),
     );
   }
 
-  // Se recibe la altura de la pantalla para ajustar separaciones
-  Widget _buildConversorNormal(double screenHeight) {
+  Widget _buildConversorNormal(double screenHeight, double tasaAMostrar) {
     return Column(
       children: [
         TextField(
           controller: _foreignController,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          inputFormatters: [FormatoMiles()],
+          inputFormatters: [CurrencyInputFormatter(defaultValue: "1,00")],
+          onTap: () {
+            _foreignController.selection = TextSelection(
+                baseOffset: 0, extentOffset: _foreignController.text.length);
+          },
           onChanged: _convertirDivisaABs,
           contextMenuBuilder: _construirMenuPegar,
           textAlign: TextAlign.right,
@@ -426,11 +522,18 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                     _copiarAlPortapapeles(_foreignController.text)),
           ),
         ),
-        SizedBox(height: screenHeight * 0.03), // Espaciado Responsive
+        SizedBox(height: screenHeight * 0.03),
         TextField(
           controller: _bsController,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          inputFormatters: [FormatoMiles()],
+          inputFormatters: [
+            CurrencyInputFormatter(
+                defaultValue: _formatoInyeccion.format(tasaAMostrar))
+          ],
+          onTap: () {
+            _bsController.selection = TextSelection(
+                baseOffset: 0, extentOffset: _bsController.text.length);
+          },
           onChanged: _convertirBsADivisa,
           contextMenuBuilder: _construirMenuPegar,
           textAlign: TextAlign.right,
@@ -454,8 +557,10 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
       children: [
         TextField(
           controller: _mathController,
+          scrollController: _mathScrollController,
           readOnly: true,
           showCursor: true,
+          keyboardType: TextInputType.none,
           contextMenuBuilder: _construirMenuPegar,
           textAlign: TextAlign.right,
           style: const TextStyle(
@@ -497,7 +602,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                 borderSide: BorderSide.none),
           ),
         ),
-        SizedBox(height: screenHeight * 0.02), // Espaciado Responsive
+        SizedBox(height: screenHeight * 0.02),
         Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -508,7 +613,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
               Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                 const Text("Total Bs:",
                     style: TextStyle(fontSize: 16, color: Colors.grey)),
-                // FittedBox encoge el texto si el número es inmensamente largo
                 Flexible(
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
@@ -559,7 +663,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
                 )
               ])
             ])),
-        SizedBox(height: screenHeight * 0.02), // Espaciado Responsive
+        SizedBox(height: screenHeight * 0.02),
         Column(
           children: [
             Row(children: [
@@ -588,7 +692,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
             ]),
             Row(children: [
               _btnCalc('0', screenHeight),
-              _btnCalc(',', screenHeight),
+              _btnCalc('00', screenHeight),
               _btnCalc('+', screenHeight),
             ]),
           ],
@@ -597,7 +701,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     );
   }
 
-  // Ajuste de altura dinámica en los botones
   Widget _btnCalc(String texto, double screenHeight, {Color? color}) {
     return Expanded(
       child: Padding(
@@ -606,7 +709,6 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
           onTap: () => _onCalcButtonPressed(texto),
           borderRadius: BorderRadius.circular(12),
           child: Container(
-            // La altura del botón equivale a un 2.2% de la altura total de la pantalla
             padding: EdgeInsets.symmetric(vertical: screenHeight * 0.022),
             decoration: BoxDecoration(
               color: color ?? Colors.grey.shade900,
@@ -630,6 +732,7 @@ class _CalculadoraScreenState extends State<CalculadoraScreen> {
     _foreignController.dispose();
     _bsController.dispose();
     _mathController.dispose();
+    _mathScrollController.dispose();
     super.dispose();
   }
 }
